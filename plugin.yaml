@@ -1,0 +1,40 @@
+name: max-platform
+label: MAX
+kind: platform
+version: 0.1.0
+description: >
+  MAX messenger gateway adapter for Hermes Agent (user-account mode).
+  Transport vendored from maxcli (https://github.com/dapi/maxcli):
+  incoming messages via maxlib WebSocket listener, outgoing via
+  maxapi-python (pymax). Shares the maxcli token storage
+  (~/.config/maxcli/config.json) — run `maxcli auth +7...` once
+  and both tools use the same session.
+author: dapi
+# Auth token normally comes from the maxcli config file, so nothing is
+# strictly required via env. These are surfaced in `hermes config` for
+# env-based setups.
+optional_env:
+  - name: MAX_TOKEN
+    description: "MAX session token (default: read from ~/.config/maxcli/config.json)"
+    prompt: "MAX token (empty = use maxcli config)"
+    password: true
+  - name: MAX_PHONE
+    description: "MAX account phone, e.g. +79990000000 (default: from maxcli config)"
+    prompt: "MAX phone (empty = use maxcli config)"
+    password: false
+  - name: MAX_PROFILE
+    description: "maxcli config profile name (default: default)"
+    prompt: "maxcli profile"
+    password: false
+  - name: MAX_HOME_CHANNEL
+    description: "Chat id for cron / notification delivery"
+    prompt: "Home chat id (or empty)"
+    password: false
+  - name: MAX_ALLOWED_USERS
+    description: "Comma-separated MAX user ids allowed to talk to the agent"
+    prompt: "Allowed user ids (comma-separated)"
+    password: false
+  - name: MAX_ALLOW_ALL_USERS
+    description: "Allow anyone to talk to the agent (1/true/yes)"
+    prompt: "Allow all users? (true/false)"
+    password: false
