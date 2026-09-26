@@ -313,7 +313,7 @@ async def _pymax_send(
         phone=phone,
         token=token,
         work_dir=str(_pymax_session_dir()),
-        headers=UserAgentPayload(device_type="DESKTOP", app_version="25.12.14"),
+        headers=UserAgentPayload(device_type="DESKTOP", app_version="26.25.0"),
         logger=_quiet_pymax_logger(),
         reconnect=False,
     )
