@@ -60,6 +60,31 @@ maxcli config profile.
 | `MAX_ALLOWED_USERS` | Comma-separated MAX user ids allowed to talk to the agent |
 | `MAX_ALLOW_ALL_USERS` | `true` to allow anyone (dev only) |
 
+## Multiple MAX accounts
+
+maxcli supports named profiles, so your personal maxcli usage and the gateway
+can live on different phone numbers:
+
+```bash
+# Personal account stays on the default profile
+maxcli auth +79033891228
+
+# Gateway account (second number) goes to a dedicated profile
+maxcli auth --profile hermes +79033892417
+```
+
+Then point the adapter at that profile in `~/.hermes/config.yaml`:
+
+```yaml
+platforms:
+  max:
+    enabled: true
+    extra:
+      profile: hermes
+```
+
+(or set `MAX_PROFILE=hermes` in the gateway environment).
+
 ## Caveats
 
 - Uses the **unofficial** MAX internal WebSocket API (user account). It may
