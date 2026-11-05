@@ -1,10 +1,11 @@
 name: max-platform
 label: MAX
 kind: platform
-version: 0.1.0
+version: 0.2.0
 description: >
-  MAX messenger gateway adapter for Hermes Agent (user-account mode).
-  Transport vendored from maxcli (https://github.com/dapi/maxcli):
+  MAX messenger gateway adapter for Hermes Agent. Bot mode: official MAX
+  Bot API with MAX_BOT_TOKEN (long polling, httpx only). User-account mode:
+  transport vendored from maxcli (https://github.com/dapi/maxcli):
   incoming messages via maxlib WebSocket listener, outgoing via
   maxapi-python (pymax). Shares the maxcli token storage
   (~/.config/maxcli/config.json) — run `maxcli auth +7...` once
@@ -14,6 +15,10 @@ author: dapi
 # strictly required via env. These are surfaced in `hermes config` for
 # env-based setups.
 optional_env:
+  - name: MAX_BOT_TOKEN
+    description: "MAX bot token — enables bot mode (official Bot API)"
+    prompt: "MAX bot token (empty = user-account mode)"
+    password: true
   - name: MAX_TOKEN
     description: "MAX session token (default: read from ~/.config/maxcli/config.json)"
     prompt: "MAX token (empty = use maxcli config)"

@@ -2,11 +2,63 @@
 
 MAX messenger platform adapter (gateway plugin) for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-Connects a Hermes gateway to [MAX](https://max.ru) using a **user account**
-(second phone number) instead of a commercial bot — anyone can run it with
-their own number.
+Connects a Hermes gateway to [MAX](https://max.ru) in one of two modes:
 
-The transport is vendored from [maxcli](https://github.com/dapi/maxcli):
+| Mode | Account | Transport | Dependencies |
+|---|---|---|---|
+| **bot** | a MAX bot (official [Bot API](https://dev.max.ru/docs-api)) | long polling `GET /updates`, `POST /messages` | httpx (ships with Hermes) |
+| **user** | a user account (second phone number) | unofficial WebSocket API via vendored [maxcli](https://github.com/dapi/maxcli) transport | maxlib, maxapi-python, lz4, msgpack |
+
+Bot mode is selected when `MAX_BOT_TOKEN` is set (or `extra.mode: bot`);
+otherwise the adapter runs in user mode. `MAX_MODE=bot|user` forces a mode.
+
+## Bot mode
+
+```bash
+# 1. Install the plugin
+hermes plugins install dapi/hermes-max
+hermes plugins enable max-platform
+
+# 2. Give the gateway the bot token (from the MAX bot settings)
+export MAX_BOT_TOKEN=...            # keep it in your secret store, not in git
+export MAX_ALLOWED_USERS=<your MAX user id>
+
+# 3. Enable the platform in ~/.hermes/config.yaml
+#    platforms:
+#      max:
+#        enabled: true
+#        extra:
+#          mode: bot
+
+# 4. Restart the gateway, then open the bot in MAX and press Start
+hermes gateway restart
+```
+
+What works: text both ways (markdown, long answers split into 4000-char
+parts, message edits), typing indicator, replies and forwards as context,
+inbound photos / voice / video / files (downloaded into the Hermes media
+cache), outbound images / documents / video / audio via `POST /uploads`,
+cron delivery through `MAX_HOME_CHANNEL`.
+
+No public HTTPS endpoint is required: updates come by long polling and the
+last acknowledged marker is kept in `$HERMES_HOME/max_bot_state.json`, so a
+restart does not replay messages. Unknown users get the standard Hermes
+pairing prompt unless listed in `MAX_ALLOWED_USERS`.
+
+| Env var | Description |
+|---|---|
+| `MAX_BOT_TOKEN` | Bot token (required for bot mode) |
+| `MAX_API_BASE_URL` | API base, default `https://platform-api.max.ru` |
+| `MAX_CA_BUNDLE` | PEM bundle for hosts signed by the Russian Trusted CA (e.g. `platform-api2.max.ru`) |
+| `MAX_MODE` | Force `bot` or `user` |
+| `MAX_HOME_CHANNEL` | Chat id for cron / notification delivery |
+| `MAX_ALLOWED_USERS` | Comma-separated MAX user ids allowed to talk to the agent |
+| `MAX_ALLOW_ALL_USERS` | `true` to allow anyone (dev only) |
+
+## User-account mode
+
+Uses a **user account** instead of a bot — anyone can run it with their own
+number. The transport is vendored from [maxcli](https://github.com/dapi/maxcli):
 
 - **Incoming messages** — `maxlib` WebSocket listener (with the local
   `Origin`-header handshake patch), reconnecting watchdog included.
@@ -16,7 +68,7 @@ The transport is vendored from [maxcli](https://github.com/dapi/maxcli):
   (`~/.config/maxcli/config.json`): authenticate once, both tools reuse
   the session.
 
-## Install
+### Install
 
 ```bash
 # 1. Install the plugin
@@ -45,7 +97,7 @@ Or clone manually into the plugins directory:
 git clone https://github.com/dapi/hermes-max ~/.hermes/plugins/max
 ```
 
-## Configuration
+### Configuration
 
 All settings are optional — by default the adapter reads token/phone from the
 maxcli config profile.
@@ -60,7 +112,7 @@ maxcli config profile.
 | `MAX_ALLOWED_USERS` | Comma-separated MAX user ids allowed to talk to the agent |
 | `MAX_ALLOW_ALL_USERS` | `true` to allow anyone (dev only) |
 
-## Multiple MAX accounts
+### Multiple MAX accounts
 
 maxcli supports named profiles, so your personal maxcli usage and the gateway
 can live on different phone numbers:
@@ -87,10 +139,19 @@ platforms:
 
 ## Caveats
 
-- Uses the **unofficial** MAX internal WebSocket API (user account). It may
+- User mode uses the **unofficial** MAX internal WebSocket API. It may
   break without notice and may violate MAX ToS — like any user-account bridge.
+  Bot mode uses only the official Bot API.
 - The `maxlib` listener is supervised by a reconnecting watchdog inside the
   adapter; the pymax sender reconnects per send.
+
+## Tests
+
+Bot mode is covered by tests against a mocked Bot API (no network):
+
+```bash
+PYTHONPATH=~/.hermes/hermes-agent python -m pytest tests/
+```
 
 ## License
 

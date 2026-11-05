@@ -1,5 +1,15 @@
 """
-MAX messenger Platform Adapter for Hermes Agent (user-account mode).
+MAX messenger Platform Adapter for Hermes Agent.
+
+Two transports share the ``max`` platform:
+
+  - **bot mode** (``bot_adapter.py``) — official MAX Bot API with a bot token
+    (``MAX_BOT_TOKEN``); needs only httpx. Selected when a bot token is set or
+    ``extra.mode: bot``.
+  - **user-account mode** (this file) — described below.
+
+User-account mode
+-----------------
 
 Transport is vendored from maxcli (https://github.com/dapi/maxcli, GPL-3.0):
   - incoming messages: maxlib (0.1b1) WebSocket listener with the local
@@ -643,8 +653,23 @@ class MaxAdapter(BasePlatformAdapter):
 # ---------------------------------------------------------------------------
 
 
-def check_requirements() -> bool:
-    """Passive probe: are the MAX transport dependencies importable?"""
+def _bot():
+    """Lazy import: bot mode must load even when maxlib/pymax are absent."""
+    from . import bot_adapter
+
+    return bot_adapter
+
+
+def _resolve_mode(extra: Optional[dict] = None) -> str:
+    """``bot`` or ``user``: explicit MAX_MODE / extra.mode wins, else a bot token implies bot."""
+    extra = extra or {}
+    mode = str(os.getenv("MAX_MODE") or extra.get("mode") or "").strip().lower()
+    if mode in ("bot", "user"):
+        return mode
+    return "bot" if _bot().resolve_bot_token(extra) else "user"
+
+
+def _user_deps_available() -> bool:
     try:
         import lz4.block  # noqa: F401
         import msgpack  # noqa: F401
@@ -655,13 +680,24 @@ def check_requirements() -> bool:
     return True
 
 
+def check_requirements() -> bool:
+    """Passive probe: are the dependencies of the active transport importable?"""
+    if _resolve_mode() == "bot":
+        return _bot().HTTPX_AVAILABLE
+    return _user_deps_available()
+
+
 def _token_available() -> bool:
+    if _bot().resolve_bot_token({}):
+        return True
     token, _phone, _profile = _resolve_credentials({})
     return bool(token)
 
 
 def validate_config(config) -> bool:
     extra = getattr(config, "extra", {}) or {}
+    if _resolve_mode(extra) == "bot":
+        return bool(_bot().resolve_bot_token(extra))
     token, _phone, _profile = _resolve_credentials(extra)
     return bool(token)
 
@@ -673,17 +709,18 @@ def is_connected(config) -> bool:
 def _env_enablement() -> dict | None:
     """Seed PlatformConfig.extra from env/maxcli-config before adapter start.
 
-    Returns None when no MAX token is resolvable (platform not configured).
+    Returns None when no MAX credentials are resolvable (platform not configured).
     """
     if not _token_available():
         return None
     seed: dict = {}
-    phone = os.getenv("MAX_PHONE") or os.getenv("MAXCLI_PHONE")
-    if phone:
-        seed["phone"] = phone
-    profile = os.getenv("MAX_PROFILE") or os.getenv("MAXCLI_PROFILE")
-    if profile:
-        seed["profile"] = profile
+    if _resolve_mode() == "user":
+        phone = os.getenv("MAX_PHONE") or os.getenv("MAXCLI_PHONE")
+        if phone:
+            seed["phone"] = phone
+        profile = os.getenv("MAX_PROFILE") or os.getenv("MAXCLI_PROFILE")
+        if profile:
+            seed["profile"] = profile
     home = os.getenv("MAX_HOME_CHANNEL", "").strip()
     if home:
         seed["home_channel"] = {
@@ -691,6 +728,13 @@ def _env_enablement() -> dict | None:
             "name": os.getenv("MAX_HOME_CHANNEL_NAME", "MAX home"),
         }
     return seed
+
+
+def _create_adapter(config):
+    extra = getattr(config, "extra", {}) or {}
+    if _resolve_mode(extra) == "bot":
+        return _bot().MaxBotAdapter(config)
+    return MaxAdapter(config)
 
 
 async def _standalone_send(
@@ -704,6 +748,8 @@ async def _standalone_send(
 ) -> Dict[str, Any]:
     """Out-of-process send for cron delivery (no live gateway adapter)."""
     extra = getattr(pconfig, "extra", {}) or {}
+    if _resolve_mode(extra) == "bot":
+        return await _bot().standalone_send(pconfig, chat_id, message, media_files=media_files)
     token, phone, _profile = _resolve_credentials(extra)
     if not token or not phone:
         return {
@@ -726,17 +772,34 @@ async def _standalone_send(
         return {"error": f"MAX standalone send failed: {e}"}
 
 
+_BOT_HINT = (
+    "You are chatting via MAX messenger as a bot. MAX renders basic markdown "
+    "(bold, italic, strikethrough, inline code, code blocks, links) but not "
+    "tables or headings — keep formatting simple. Long messages are split "
+    "into ~4000-character parts. Photos, voice messages and files the user "
+    "sends are downloaded and available to you as local files."
+)
+_USER_HINT = (
+    "You are chatting via MAX messenger (user account). MAX supports "
+    "basic markdown but keep formatting simple. Long messages are "
+    "automatically split into ~4000-character chunks. Attachments "
+    "arrive as bracketed placeholders like [photo] or [file: name]."
+)
+
+
 def register(ctx):
     """Plugin entry point: called by the Hermes plugin system."""
+    bot_mode = _resolve_mode() == "bot"
     ctx.register_platform(
         name="max",
         label="MAX",
-        adapter_factory=lambda cfg: MaxAdapter(cfg),
+        adapter_factory=_create_adapter,
         check_fn=check_requirements,
         validate_config=validate_config,
         is_connected=is_connected,
         required_env=[],
         install_hint=(
+            "bot mode: set MAX_BOT_TOKEN (httpx only); user mode: "
             "pip install maxlib==0.1b1 maxapi-python==1.2.5 lz4 msgpack "
             "&& maxcli auth +7..."
         ),
@@ -749,10 +812,5 @@ def register(ctx):
         emoji="🔷",
         pii_safe=False,
         allow_update_command=True,
-        platform_hint=(
-            "You are chatting via MAX messenger (user account). MAX supports "
-            "basic markdown but keep formatting simple. Long messages are "
-            "automatically split into ~4000-character chunks. Attachments "
-            "arrive as bracketed placeholders like [photo] or [file: name]."
-        ),
+        platform_hint=_BOT_HINT if bot_mode else _USER_HINT,
     )
