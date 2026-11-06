@@ -30,6 +30,7 @@ Environment variables:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import mimetypes
@@ -58,11 +59,15 @@ except ImportError:  # pragma: no cover - httpx is a Hermes core dependency
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_API_BASE = "https://platform-api.max.ru"
+DEFAULT_API_BASE = "https://platform-api2.max.ru"
 MAX_TEXT_LIMIT = 4000
 POLL_TIMEOUT_SECONDS = 30
 POLL_BACKOFF = (1, 2, 5, 10, 30, 60)
 UPDATE_TYPES = "message_created,bot_started"
+WEBHOOK_UPDATE_TYPES = ["message_created", "bot_started"]
+DEFAULT_WEBHOOK_HOST = "0.0.0.0"
+DEFAULT_WEBHOOK_PORT = 8645
+DEFAULT_WEBHOOK_PATH = "/max/webhook"
 # With no saved marker (first run) MAX replays its backlog; drop anything older.
 FIRST_RUN_MAX_AGE_SECONDS = 300
 ATTACHMENT_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0)
@@ -291,9 +296,26 @@ class MaxBotAdapter(BasePlatformAdapter):
             int(self._extra.get("max_message_length") or MAX_TEXT_LIMIT), MAX_TEXT_LIMIT
         )
         self._markdown = str(self._extra.get("markdown", True)).lower() not in ("false", "0", "no")
+        self._webhook_url = str(
+            os.getenv("MAX_WEBHOOK_URL") or self._extra.get("webhook_url") or ""
+        ).strip()
+        self._webhook_secret = str(
+            os.getenv("MAX_WEBHOOK_SECRET") or self._extra.get("webhook_secret") or ""
+        ).strip()
+        self._webhook_host = str(
+            os.getenv("MAX_WEBHOOK_HOST") or self._extra.get("webhook_host") or DEFAULT_WEBHOOK_HOST
+        ).strip()
+        self._webhook_port = int(
+            os.getenv("MAX_WEBHOOK_PORT") or self._extra.get("webhook_port") or DEFAULT_WEBHOOK_PORT
+        )
+        path = str(
+            os.getenv("MAX_WEBHOOK_PATH") or self._extra.get("webhook_path") or DEFAULT_WEBHOOK_PATH
+        ).strip()
+        self._webhook_path = path if path.startswith("/") else f"/{path}"
 
         self._client: Optional["httpx.AsyncClient"] = None
         self._poll_task: Optional[asyncio.Task] = None
+        self._webhook_runner: Any = None
         self._me_id: Optional[int] = None
         self._me_name: Optional[str] = None
         self._marker: Optional[int] = None
@@ -345,11 +367,37 @@ class MaxBotAdapter(BasePlatformAdapter):
         self._first_run = self._marker is None
 
         self._mark_connected()
-        self._poll_task = asyncio.create_task(self._poll_loop())
-        logger.info(
-            "MAX bot: connected as %s (id %s), long polling %s",
-            self._me_name, self._me_id, _api_base(self._extra),
-        )
+        if self._webhook_url:
+            if not self._webhook_secret:
+                await self._close_client()
+                self._set_fatal_error(
+                    "config_missing", "MAX webhook mode requires MAX_WEBHOOK_SECRET", retryable=False
+                )
+                return False
+            try:
+                await self._start_webhook_listener()
+                await self._ensure_webhook_subscription()
+            except Exception as exc:
+                await self._stop_webhook_listener()
+                await self._close_client()
+                logger.error("MAX bot: webhook setup failed: %s", exc)
+                self._set_fatal_error("connect_failed", str(exc), retryable=True)
+                return False
+            logger.info(
+                "MAX bot: connected as %s (id %s), webhook %s -> %s:%s%s",
+                self._me_name,
+                self._me_id,
+                self._webhook_url,
+                self._webhook_host,
+                self._webhook_port,
+                self._webhook_path,
+            )
+        else:
+            self._poll_task = asyncio.create_task(self._poll_loop())
+            logger.info(
+                "MAX bot: connected as %s (id %s), long polling %s",
+                self._me_name, self._me_id, _api_base(self._extra),
+            )
         self._wire_plugin_handlers(None)
         return True
 
@@ -362,7 +410,75 @@ class MaxBotAdapter(BasePlatformAdapter):
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
+        await self._stop_webhook_listener()
         await self._close_client()
+
+    async def _start_webhook_listener(self) -> None:
+        from aiohttp import web
+        from gateway.platforms.shared_ingress import bind_listener
+
+        app = web.Application(client_max_size=16 * 1024 * 1024)
+        app.router.add_get("/health", self._handle_webhook_health)
+        app.router.add_post(self._webhook_path, self._handle_webhook)
+        self._webhook_runner = await bind_listener(
+            self,
+            app,
+            self._webhook_host or None,
+            self._webhook_port,
+            self._webhook_path,
+            access_log=None,
+        )
+
+    async def _stop_webhook_listener(self) -> None:
+        runner, self._webhook_runner = self._webhook_runner, None
+        if runner is not None:
+            try:
+                await runner.cleanup()
+            except Exception:
+                pass
+
+    async def _handle_webhook_health(self, request):
+        from aiohttp import web
+
+        return web.json_response({"status": "ok", "platform": "max"})
+
+    async def _handle_webhook(self, request):
+        from aiohttp import web
+
+        actual = request.headers.get("X-Max-Bot-Api-Secret", "")
+        if not self._webhook_secret or not hmac.compare_digest(actual, self._webhook_secret):
+            return web.json_response({"success": False, "error": "unauthorized"}, status=401)
+        try:
+            update = await request.json()
+        except Exception:
+            return web.json_response({"success": False, "error": "invalid json"}, status=400)
+        if not isinstance(update, dict):
+            return web.json_response({"success": False, "error": "invalid update"}, status=400)
+        try:
+            await self._handle_update(update)
+        except Exception:
+            logger.exception("MAX bot: failed to handle webhook update")
+            return web.json_response({"success": False}, status=500)
+        return web.json_response({"success": True})
+
+    async def _ensure_webhook_subscription(self) -> None:
+        if self._client is None or not self._webhook_url:
+            return
+        resp = await self._client.get("/subscriptions")
+        _raise_for_api(resp)
+        subscriptions = (resp.json() or {}).get("subscriptions") or []
+        for subscription in subscriptions:
+            if subscription.get("url") == self._webhook_url:
+                return
+        resp = await self._client.post(
+            "/subscriptions",
+            json={
+                "url": self._webhook_url,
+                "update_types": WEBHOOK_UPDATE_TYPES,
+                "secret": self._webhook_secret,
+            },
+        )
+        _raise_for_api(resp)
 
     async def _close_client(self) -> None:
         client, self._client = self._client, None

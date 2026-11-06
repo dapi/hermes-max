@@ -255,6 +255,102 @@ def test_poll_loop_stops_on_rejected_token():
     assert ad._running is False  # fatal, no retry storm
 
 
+class _WebhookRequest:
+    def __init__(self, payload, secret=None):
+        self._payload = payload
+        self.headers = {}
+        if secret is not None:
+            self.headers["X-Max-Bot-Api-Secret"] = secret
+
+    async def json(self):
+        return self._payload
+
+
+def test_webhook_dispatches_voice_update():
+    ad = make_adapter(_no_http, extra={"webhook_secret": "hook-secret"})
+
+    async def fake_download(url, **kwargs):
+        return "/cache/voice.ogg", "audio/ogg"
+
+    ad._download_to_cache = fake_download
+    update = message_update(
+        "",
+        attachments=[{"type": "audio", "payload": {"url": "https://cdn/voice", "token": "t"}}],
+    )
+    response = run(ad._handle_webhook(_WebhookRequest(update, "hook-secret")))
+    assert response.status == 200
+    (event,) = ad.events
+    assert event.message_type == MessageType.VOICE
+    assert event.media_urls == ["/cache/voice.ogg"]
+
+
+def test_webhook_rejects_wrong_secret():
+    ad = make_adapter(_no_http, extra={"webhook_secret": "hook-secret"})
+    response = run(ad._handle_webhook(_WebhookRequest(message_update("no"), "wrong")))
+    assert response.status == 401
+    assert ad.events == []
+
+
+def test_webhook_subscription_is_registered_once():
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path, json.loads(request.content) if request.content else None))
+        if request.method == "GET":
+            return httpx.Response(200, json={"subscriptions": []})
+        return httpx.Response(200, json={"success": True})
+
+    ad = make_adapter(
+        handler,
+        extra={
+            "webhook_url": "https://max-hooks.office.brandymint.ru/max/webhook",
+            "webhook_secret": "hook-secret",
+        },
+    )
+    run(ad._ensure_webhook_subscription())
+    assert calls == [
+        ("GET", "/subscriptions", None),
+        (
+            "POST",
+            "/subscriptions",
+            {
+                "url": "https://max-hooks.office.brandymint.ru/max/webhook",
+                "update_types": ["message_created", "bot_started"],
+                "secret": "hook-secret",
+            },
+        ),
+    ]
+
+
+def test_existing_webhook_subscription_is_not_duplicated():
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        return httpx.Response(
+            200,
+            json={
+                "subscriptions": [
+                    {
+                        "url": "https://max-hooks.office.brandymint.ru/max/webhook",
+                        "time": 1,
+                        "update_types": ["message_created", "bot_started"],
+                    }
+                ]
+            },
+        )
+
+    ad = make_adapter(
+        handler,
+        extra={
+            "webhook_url": "https://max-hooks.office.brandymint.ru/max/webhook",
+            "webhook_secret": "hook-secret",
+        },
+    )
+    run(ad._ensure_webhook_subscription())
+    assert calls == [("GET", "/subscriptions")]
+
+
 # ── outbound ───────────────────────────────────────────────────────────────
 
 

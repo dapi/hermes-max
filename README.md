@@ -6,7 +6,8 @@ Connects a Hermes gateway to [MAX](https://max.ru) in one of two modes:
 
 | Mode | Account | Transport | Dependencies |
 |---|---|---|---|
-| **bot** | a MAX bot (official [Bot API](https://dev.max.ru/docs-api)) | long polling `GET /updates`, `POST /messages` | httpx (ships with Hermes) |
+| **bot / polling** | a MAX bot | long polling `GET /updates`, `POST /messages` | httpx (ships with Hermes) |
+| **bot / webhook** | a MAX bot | HTTPS webhook, `POST /messages` | httpx + aiohttp (ship with Hermes) |
 | **user** | a user account (second phone number) | unofficial WebSocket API via vendored [maxcli](https://github.com/dapi/maxcli) transport | maxlib, maxapi-python, lz4, msgpack |
 
 Bot mode is selected when `MAX_BOT_TOKEN` is set (or `extra.mode: bot`);
@@ -40,16 +41,38 @@ inbound photos / voice / video / files (downloaded into the Hermes media
 cache), outbound images / documents / video / audio via `POST /uploads`,
 cron delivery through `MAX_HOME_CHANNEL`.
 
-No public HTTPS endpoint is required: updates come by long polling and the
-last acknowledged marker is kept in `$HERMES_HOME/max_bot_state.json`, so a
-restart does not replay messages. Unknown users get the standard Hermes
-pairing prompt unless listed in `MAX_ALLOWED_USERS`.
+By default the adapter uses long polling. Set `MAX_WEBHOOK_URL` and
+`MAX_WEBHOOK_SECRET` to switch bot mode to webhook delivery. The adapter binds
+a local HTTP listener, verifies `X-Max-Bot-Api-Secret`, registers the public
+URL with `POST /subscriptions`, and does not start `GET /updates`.
+
+```bash
+export MAX_WEBHOOK_URL=https://max-hooks.office.brandymint.ru/max/webhook
+export MAX_WEBHOOK_SECRET=...       # random secret, keep outside git
+export MAX_WEBHOOK_HOST=0.0.0.0     # optional, default
+export MAX_WEBHOOK_PORT=8645        # optional, default
+export MAX_WEBHOOK_PATH=/max/webhook
+```
+
+Webhook mode is preferred for production and for native microphone voice
+messages: current MAX clients may produce incomplete events over long polling,
+while webhook delivery includes the `audio` attachment URL.
+
+Long-poll mode needs no public endpoint: the last acknowledged marker is kept
+in `$HERMES_HOME/max_bot_state.json`, so a restart does not replay messages.
+Unknown users get the standard Hermes pairing prompt unless listed in
+`MAX_ALLOWED_USERS`.
 
 | Env var | Description |
 |---|---|
 | `MAX_BOT_TOKEN` | Bot token (required for bot mode) |
-| `MAX_API_BASE_URL` | API base, default `https://platform-api.max.ru` |
-| `MAX_CA_BUNDLE` | PEM bundle for hosts signed by the Russian Trusted CA (e.g. `platform-api2.max.ru`) |
+| `MAX_API_BASE_URL` | API base, default `https://platform-api2.max.ru` |
+| `MAX_CA_BUNDLE` | PEM bundle for hosts signed by the Russian Trusted CA |
+| `MAX_WEBHOOK_URL` | Public HTTPS callback URL; enables webhook mode when set |
+| `MAX_WEBHOOK_SECRET` | Secret expected in `X-Max-Bot-Api-Secret` (required in webhook mode) |
+| `MAX_WEBHOOK_HOST` | Local listener bind host, default `0.0.0.0` |
+| `MAX_WEBHOOK_PORT` | Local listener port, default `8645` |
+| `MAX_WEBHOOK_PATH` | Local callback path, default `/max/webhook` |
 | `MAX_MODE` | Force `bot` or `user` |
 | `MAX_HOME_CHANNEL` | Chat id for cron / notification delivery |
 | `MAX_ALLOWED_USERS` | Comma-separated MAX user ids allowed to talk to the agent |
