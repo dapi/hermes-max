@@ -186,6 +186,48 @@ def test_attachments_are_cached_or_described():
     assert event.text == "[location: 55.7, 37.6] [sticker]"
 
 
+def test_attachment_download_retries_transient_transport_failure():
+    attempts = []
+
+    class Response:
+        headers = {"content-type": "image/webp"}
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_bytes(self):
+            yield b"RIFF"
+            yield b"WEBP"
+
+    class Stream:
+        async def __aenter__(self):
+            attempts.append("attempt")
+            if len(attempts) == 1:
+                raise httpx.ReadTimeout("temporary CDN timeout")
+            return Response()
+
+        async def __aexit__(self, *args):
+            return False
+
+    class Client:
+        def stream(self, method, url):
+            assert method == "GET"
+            assert url == "https://cdn/image"
+            return Stream()
+
+    data, mime = run(
+        bot._fetch_attachment_bytes(
+            Client(),
+            "https://cdn/image",
+            media_kind="image",
+            retry_delays=(0.0,),
+        )
+    )
+    assert attempts == ["attempt", "attempt"]
+    assert data == b"RIFFWEBP"
+    assert mime == "image/webp"
+
+
 def test_voice_message_is_voice_type():
     ad = make_adapter(_no_http)
 

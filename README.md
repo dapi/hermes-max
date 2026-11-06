@@ -38,8 +38,9 @@ hermes gateway restart
 What works: text both ways (markdown, long answers split into 4000-char
 parts, message edits), typing indicator, replies and forwards as context,
 inbound photos / voice / video / files (downloaded into the Hermes media
-cache), outbound images / documents / video / audio via `POST /uploads`,
-cron delivery through `MAX_HOME_CHANNEL`.
+cache with bounded retries for temporary CDN timeouts and 5xx/429 responses),
+outbound images / documents / video / audio via `POST /uploads`, cron delivery
+through `MAX_HOME_CHANNEL`.
 
 By default the adapter uses long polling. Set `MAX_WEBHOOK_URL` and
 `MAX_WEBHOOK_SECRET` to switch bot mode to webhook delivery. The adapter binds

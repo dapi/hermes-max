@@ -71,6 +71,7 @@ DEFAULT_WEBHOOK_PATH = "/max/webhook"
 # With no saved marker (first run) MAX replays its backlog; drop anything older.
 FIRST_RUN_MAX_AGE_SECONDS = 300
 ATTACHMENT_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0)
+INBOUND_DOWNLOAD_RETRY_DELAYS = (0.5, 1.5, 3.0)
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".heic"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
@@ -83,6 +84,65 @@ _INBOUND_KINDS = {
     "audio": (MessageType.VOICE, "audio", ".ogg"),
     "file": (MessageType.DOCUMENT, None, ""),
 }
+
+
+async def _fetch_attachment_bytes(
+    client: Any,
+    url: str,
+    *,
+    media_kind: str,
+    retry_delays: Tuple[float, ...] = INBOUND_DOWNLOAD_RETRY_DELAYS,
+) -> Tuple[bytes, str]:
+    """Fetch an inbound CDN object, retrying temporary transport/server failures."""
+    from gateway.platforms.base import validate_inbound_media_size
+
+    delays = list(retry_delays)
+    while True:
+        chunks: List[bytes] = []
+        total = 0
+        try:
+            async with client.stream("GET", url) as resp:
+                resp.raise_for_status()
+                mime = (resp.headers.get("content-type") or "").split(";")[0].strip()
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    validate_inbound_media_size(total, media_type=media_kind)
+                    chunks.append(chunk)
+            return b"".join(chunks), mime
+        except Exception as exc:
+            transport_types = tuple(
+                cls for cls in (
+                    getattr(httpx, "TimeoutException", None),
+                    getattr(httpx, "TransportError", None),
+                ) if cls is not None
+            )
+            status_error_type = getattr(httpx, "HTTPStatusError", None) if HTTPX_AVAILABLE else None
+            is_transport = bool(transport_types) and isinstance(exc, transport_types)
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            is_retryable_status = bool(
+                status_error_type
+                and isinstance(exc, status_error_type)
+                and status is not None
+                and (status in (408, 425, 429) or status >= 500)
+            )
+            if not is_transport and not is_retryable_status:
+                raise
+            if not delays:
+                raise
+            delay = delays.pop(0)
+            if is_retryable_status:
+                logger.info(
+                    "MAX bot: attachment CDN returned %s, retry in %.1fs",
+                    status,
+                    delay,
+                )
+            else:
+                logger.info(
+                    "MAX bot: temporary attachment download failure (%s), retry in %.1fs",
+                    type(exc).__name__,
+                    delay,
+                )
+            await asyncio.sleep(delay)
 
 
 class MaxApiError(Exception):
@@ -755,23 +815,17 @@ class MaxBotAdapter(BasePlatformAdapter):
     async def _download_to_cache(
         self, url: str, *, filename: str, default_kind: Optional[str], default_ext: str
     ) -> Optional[Tuple[str, str]]:
-        from gateway.platforms.base import cache_media_bytes_async, validate_inbound_media_size
+        from gateway.platforms.base import cache_media_bytes_async
 
-        chunks: List[bytes] = []
-        total = 0
         # Attachment CDNs are public hosts: no Authorization header, default trust store.
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0), follow_redirects=True) as dl:
-            async with dl.stream("GET", url) as resp:
-                resp.raise_for_status()
-                mime = (resp.headers.get("content-type") or "").split(";")[0].strip()
-                async for chunk in resp.aiter_bytes():
-                    total += len(chunk)
-                    validate_inbound_media_size(total, media_type=default_kind or "document")
-                    chunks.append(chunk)
+            data, mime = await _fetch_attachment_bytes(
+                dl, url, media_kind=default_kind or "document"
+            )
         if not filename and default_ext and not mimetypes.guess_extension(mime or ""):
             filename = f"attachment{default_ext}"
         cached = await cache_media_bytes_async(
-            b"".join(chunks), filename=filename, mime_type=mime, default_kind=default_kind
+            data, filename=filename, mime_type=mime, default_kind=default_kind
         )
         if cached is None:
             return None
